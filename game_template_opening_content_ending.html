@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MEDICAL RUNNER</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #0f1720;
+      color: #fff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    #app {
+      width: min(94vw, 520px);
+      background: #18222c;
+      border: 3px solid #4b657a;
+      border-radius: 16px;
+      padding: 20px;
+      text-align: center;
+      box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    }
+    h1, h2 { margin-top: 0; }
+    .screen { display: none; }
+    .screen.active { display: block; }
+    .desc {
+      line-height: 1.7;
+      margin: 14px 0 22px;
+      color: #d9e5ee;
+    }
+    .button-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 14px 22px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #3aa76d;
+      color: white;
+    }
+    .hud {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      font-weight: bold;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 15px;
+    }
+    canvas {
+      width: 100%;
+      max-width: 480px;
+      height: auto;
+      background: linear-gradient(#dff4ff 0%, #eff9ff 100%);
+      border: 2px solid #6f879a;
+      border-radius: 12px;
+      display: block;
+      margin: 0 auto 14px;
+      touch-action: manipulation;
+    }
+    .jump-btn {
+      width: min(220px, 70vw);
+      font-size: 18px;
+      padding: 16px 20px;
+    }
+    .result {
+      font-size: 22px;
+      font-weight: bold;
+      margin: 18px 0 8px;
+    }
+    .legend {
+      font-size: 13px;
+      color: #cfe0ea;
+      margin-top: 10px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <section id="opening" class="screen active">
+      <h1>MEDICAL RUNNER</h1>
+      <p class="desc">
+        病院の廊下を走りながら、注射器や菌をよけ、
+        薬カプセルを回収するシンプルゲームです。<br>
+        下のボタンか、スペースキーでジャンプします。
+      </p>
+      <div class="button-row">
+        <button onclick="startGame()">スタート</button>
+      </div>
+    </section>
+
+    <section id="playing" class="screen">
+      <h2>ゲーム本編</h2>
+      <div class="hud">
+        <div>スコア: <span id="score">0</span></div>
+        <div>薬: <span id="items">0</span></div>
+        <div>最高: <span id="bestScore">0</span></div>
+      </div>
+      <canvas id="gameCanvas" width="480" height="240"></canvas>
+      <div class="button-row">
+        <button class="jump-btn" id="jumpBtn">ジャンプ</button>
+      </div>
+      <div class="legend">
+        赤い注射器・緑の菌にぶつかると終了<br>
+        青と赤のカプセルを <b>5個</b> 集めると患者さんが出現<br>
+        患者さんに薬を届けたらクリア
+      </div>
+    </section>
+
+    <section id="ending" class="screen">
+      <h2>エンディング</h2>
+      <div class="result">最終スコア: <span id="finalScore">0</span></div>
+      <p class="desc" id="endingMessage">おつかれさまでした。</p>
+      <div class="button-row">
+        <button onclick="restartGame()">もう一回</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const itemsEl = document.getElementById('items');
+    const bestScoreEl = document.getElementById('bestScore');
+    const finalScoreEl = document.getElementById('finalScore');
+    const endingMessageEl = document.getElementById('endingMessage');
+    const jumpBtn = document.getElementById('jumpBtn');
+
+    let animationId = null;
+    let audioCtx = null;
+    let score = 0;
+    let items = 0;
+    let bestScore = 0;
+    let frame = 0;
+    let gameRunning = false;
+
+    const groundY = 194;
+    const patientGoalItems = 5;
+
+    const player = {
+      x: 70,
+      y: groundY - 42,
+      w: 34,
+      h: 42,
+      vy: 0,
+      gravity: 0.72,
+      jumpPower: -11.8,
+      onGround: true
+    };
+
+    let obstacles = [];
+    let capsules = [];
+    let patient = null;
+    let celebrationEffects = [];
+    let isHappyEnding = false;
+    let celebrationTimer = 0;
+
+    function ensureAudioContext() {
+      if (!audioCtx) {
+        const AudioCtor = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtor) {
+          audioCtx = new AudioCtor();
+        }
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function beep(freq, duration, type = 'sine', volume = 0.03) {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      gain.gain.value = volume;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + duration);
+    }
+
+    function playJumpSound() {
+      beep(440, 0.07, 'square', 0.025);
+      setTimeout(() => beep(620, 0.05, 'square', 0.02), 35);
+    }
+
+    function playItemSound() {
+      beep(700, 0.05, 'sine', 0.03);
+      setTimeout(() => beep(900, 0.06, 'sine', 0.025), 45);
+    }
+
+    function playHitSound() {
+      beep(160, 0.12, 'sawtooth', 0.04);
+      setTimeout(() => beep(120, 0.18, 'sawtooth', 0.035), 80);
+    }
+
+    function playClearSound() {
+      beep(660, 0.06, 'sine', 0.03);
+      setTimeout(() => beep(880, 0.07, 'sine', 0.03), 60);
+      setTimeout(() => beep(1040, 0.09, 'sine', 0.03), 130);
+    }
+
+    function playHappyEndingMusic() {
+      const notes = [659, 784, 880, 1047, 988, 1175, 1319];
+      notes.forEach((note, index) => {
+        setTimeout(() => beep(note, 0.18, 'sine', 0.035), index * 160);
+      });
+    }
+
+    function showScreen(screenId) {
+      document.querySelectorAll('.screen').forEach((screen) => {
+        screen.classList.remove('active');
+      });
+      document.getElementById(screenId).classList.add('active');
+    }
+
+    function updateHud() {
+      scoreEl.textContent = String(score);
+      itemsEl.textContent = String(items);
+      bestScoreEl.textContent = String(bestScore);
+    }
+
+    function resetGameData() {
+      score = 0;
+      items = 0;
+      frame = 0;
+      celebrationTimer = 0;
+      player.y = groundY - player.h;
+      player.vy = 0;
+      player.onGround = true;
+      obstacles = [];
+      capsules = [];
+      patient = null;
+      celebrationEffects = [];
+      isHappyEnding = false;
+      updateHud();
+      spawnObstacle();
+      spawnCapsule(420);
+    }
+
+    function startGame() {
+      ensureAudioContext();
+      cancelAnimationFrame(animationId);
+      resetGameData();
+      showScreen('playing');
+      gameRunning = true;
+      loop();
+    }
+
+    function restartGame() {
+      cancelAnimationFrame(animationId);
+      gameRunning = false;
+      showScreen('opening');
+      draw();
+    }
+
+    function jump() {
+      if (!gameRunning || !player.onGround) return;
+      ensureAudioContext();
+      player.vy = player.jumpPower;
+      player.onGround = false;
+      playJumpSound();
+    }
+
+    function spawnObstacle() {
+      const isGerm = Math.random() < 0.45;
+      if (isGerm) {
+        const size = 24 + Math.random() * 12;
+        obstacles.push({
+          type: 'germ',
+          x: canvas.width + Math.random() * 120,
+          y: groundY - size - 2,
+          w: size,
+          h: size,
+          speed: 4.6 + Math.random() * 1.4,
+          passed: false
+        });
+        return;
+      }
+
+      const height = 26 + Math.random() * 18;
+      obstacles.push({
+        type: 'syringe',
+        x: canvas.width + Math.random() * 120,
+        y: groundY - height,
+        w: 48,
+        h: height,
+        speed: 4.8 + Math.random() * 1.4,
+        passed: false
+      });
+    }
+
+    function spawnCapsule(startX) {
+      capsules.push({
+        x: startX !== undefined && startX !== null ? startX : canvas.width + 180 + Math.random() * 160,
+        y: 92 + Math.random() * 56,
+        w: 30,
+        h: 16,
+        speed: 4.6,
+        taken: false
+      });
+    }
+
+    function spawnPatient() {
+      patient = {
+        x: canvas.width + 60,
+        y: groundY - 54,
+        w: 34,
+        h: 54,
+        speed: 3.8
+      };
+      obstacles = [];
+    }
+
+    function isColliding(a, b) {
+      return a.x < b.x + b.w &&
+        a.x + a.w > b.x &&
+        a.y < b.y + b.h &&
+        a.y + a.h > b.y;
+    }
+
+    function update() {
+      frame += 1;
+
+      player.vy += player.gravity;
+      player.y += player.vy;
+      if (player.y >= groundY - player.h) {
+        player.y = groundY - player.h;
+        player.vy = 0;
+        player.onGround = true;
+      }
+
+      if (!patient) {
+        if (frame % 95 === 0) spawnObstacle();
+        if (frame % 140 === 0 && items < patientGoalItems) spawnCapsule();
+      }
+
+      for (const obstacle of obstacles) {
+        obstacle.x -= obstacle.speed;
+        if (!obstacle.passed && obstacle.x + obstacle.w < player.x) {
+          obstacle.passed = true;
+          score += 1;
+        }
+        if (isColliding(player, obstacle)) {
+          ensureAudioContext();
+          playHitSound();
+          endGame(false);
+          return;
+        }
+      }
+
+      for (const capsule of capsules) {
+        capsule.x -= capsule.speed;
+        if (!capsule.taken && isColliding(player, capsule)) {
+          capsule.taken = true;
+          items += 1;
+          score += 3;
+          ensureAudioContext();
+          playItemSound();
+          if (items >= patientGoalItems && !patient) {
+            spawnPatient();
+          }
+        }
+      }
+
+      if (patient) {
+        patient.x -= patient.speed;
+
+        const patientReachBox = {
+          x: patient.x - 10,
+          y: patient.y,
+          w: patient.w + 20,
+          h: patient.h
+        };
+
+        const sameLane = player.y + player.h > patient.y + 10;
+        const closeEnough = patient.x <= player.x + player.w + 8;
+
+        if (isColliding(player, patientReachBox) || (sameLane && closeEnough)) {
+          ensureAudioContext();
+          playClearSound();
+          endGame(true);
+          return;
+        }
+      }
+
+      obstacles = obstacles.filter((obstacle) => obstacle.x + obstacle.w > -30);
+      capsules = capsules.filter((capsule) => capsule.x + capsule.w > -30 && !capsule.taken);
+      updateHud();
+    }
+
+    function drawHospitalBackground() {
+      ctx.fillStyle = '#10213c';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = '#173154';
+      ctx.fillRect(0, 20, canvas.width, 90);
+
+      for (let i = 0; i < canvas.width; i += 96) {
+        ctx.fillStyle = '#223f67';
+        ctx.fillRect(i, 28, 56, 70);
+
+        ctx.fillStyle = i % 192 === 0 ? '#ffe08a' : '#b7d7ff';
+        ctx.fillRect(i + 8, 38, 16, 18);
+        ctx.fillRect(i + 32, 38, 16, 18);
+        ctx.fillRect(i + 8, 66, 16, 18);
+        ctx.fillRect(i + 32, 66, 16, 18);
+      }
+
+      ctx.fillStyle = '#294b70';
+      ctx.fillRect(0, 110, canvas.width, 12);
+
+      ctx.fillStyle = '#314a64';
+      ctx.fillRect(0, 122, canvas.width, groundY - 122);
+
+      ctx.fillStyle = '#45627d';
+      for (let i = 0; i < canvas.width; i += 96) {
+        ctx.fillRect(i + 8, 142, 18, 52);
+      }
+
+      ctx.fillStyle = '#586f85';
+      ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+      ctx.strokeStyle = 'rgba(220,235,255,0.7)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.lineTo(canvas.width, groundY);
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(235,245,255,0.18)';
+      for (let x = 0; x < canvas.width; x += 54) {
+        ctx.fillRect(x + 8, groundY + 16, 20, 4);
+      }
+
+      ctx.fillStyle = '#20354d';
+      ctx.fillRect(344, 14, 106, 34);
+      ctx.strokeStyle = '#8db3d1';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(344, 14, 106, 34);
+      ctx.fillStyle = '#e8f3ff';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('NIGHT HOSPITAL', 350, 36);
+
+      ctx.fillStyle = 'rgba(255,244,176,0.18)';
+      ctx.beginPath();
+      ctx.arc(70, 34, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff4b0';
+      ctx.beginPath();
+      ctx.arc(70, 34, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawPlayer() {
+      ctx.save();
+      ctx.strokeStyle = '#0b2332';
+      ctx.lineWidth = 3;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(player.x + 5, player.y, 24, 18);
+      ctx.strokeRect(player.x + 5, player.y, 24, 18);
+
+      ctx.fillStyle = '#f2c49f';
+      ctx.fillRect(player.x + 11, player.y + 3, 12, 10);
+      ctx.strokeRect(player.x + 11, player.y + 3, 12, 10);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(player.x, player.y + 16, 34, 28);
+      ctx.strokeRect(player.x, player.y + 16, 34, 28);
+
+      ctx.fillStyle = '#00c2d6';
+      ctx.fillRect(player.x + 14, player.y + 20, 6, 18);
+      ctx.fillRect(player.x + 8, player.y + 26, 18, 6);
+      ctx.strokeRect(player.x + 14, player.y + 20, 6, 18);
+      ctx.strokeRect(player.x + 8, player.y + 26, 18, 6);
+
+      ctx.fillStyle = '#0b2332';
+      ctx.fillRect(player.x + 13, player.y + 7, 2, 2);
+      ctx.fillRect(player.x + 19, player.y + 7, 2, 2);
+      ctx.fillRect(player.x + 15, player.y + 10, 4, 2);
+      ctx.restore();
+    }
+
+    function drawSyringe(obstacle) {
+      ctx.save();
+      ctx.strokeStyle = '#4a0f0f';
+      ctx.lineWidth = 3;
+      ctx.fillStyle = '#ff4d4d';
+      ctx.fillRect(obstacle.x, obstacle.y + 8, 26, 12);
+      ctx.strokeRect(obstacle.x, obstacle.y + 8, 26, 12);
+      ctx.fillStyle = '#d9f0ff';
+      ctx.fillRect(obstacle.x + 26, obstacle.y + 4, 16, 20);
+      ctx.strokeRect(obstacle.x + 26, obstacle.y + 4, 16, 20);
+      ctx.fillStyle = '#8ea5b3';
+      ctx.fillRect(obstacle.x + 42, obstacle.y + 11, 8, 6);
+      ctx.strokeRect(obstacle.x + 42, obstacle.y + 11, 8, 6);
+      ctx.fillRect(obstacle.x + 50, obstacle.y + 13, 10, 2);
+      ctx.restore();
+    }
+
+    function drawGerm(obstacle) {
+      const cx = obstacle.x + obstacle.w / 2;
+      const cy = obstacle.y + obstacle.h / 2;
+      const r = obstacle.w / 2;
+      ctx.save();
+      ctx.fillStyle = '#34c759';
+      ctx.strokeStyle = '#145c28';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      for (let i = 0; i < 6; i += 1) {
+        const ang = (Math.PI * 2 / 6) * i;
+        const x1 = cx + Math.cos(ang) * r * 0.9;
+        const y1 = cy + Math.sin(ang) * r * 0.9;
+        const x2 = cx + Math.cos(ang) * (r + 6);
+        const y2 = cy + Math.sin(ang) * (r + 6);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#0d3116';
+      ctx.fillRect(cx - 7, cy - 4, 4, 4);
+      ctx.fillRect(cx + 3, cy - 4, 4, 4);
+      ctx.fillRect(cx - 3, cy + 5, 6, 3);
+      ctx.restore();
+    }
+
+    function drawCapsule(capsule) {
+      const r = capsule.h / 2;
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.fillStyle = '#1f7cff';
+      ctx.beginPath();
+      ctx.moveTo(capsule.x + r, capsule.y);
+      ctx.lineTo(capsule.x + capsule.w - r, capsule.y);
+      ctx.arc(capsule.x + capsule.w - r, capsule.y + r, r, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(capsule.x + r, capsule.y + capsule.h);
+      ctx.arc(capsule.x + r, capsule.y + r, r, Math.PI / 2, -Math.PI / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#0e4698';
+      ctx.stroke();
+
+      ctx.fillStyle = '#ff4b5c';
+      ctx.fillRect(capsule.x + capsule.w / 2, capsule.y, capsule.w / 2, capsule.h);
+      ctx.restore();
+    }
+
+    function drawPatient() {
+      if (!patient) return;
+      ctx.save();
+      ctx.strokeStyle = '#4d2f16';
+      ctx.lineWidth = 3;
+      ctx.fillStyle = '#f1c59d';
+      ctx.fillRect(patient.x + 9, patient.y, 14, 14);
+      ctx.strokeRect(patient.x + 9, patient.y, 14, 14);
+
+      ctx.fillStyle = '#ffd54f';
+      ctx.fillRect(patient.x + 4, patient.y + 14, 24, 24);
+      ctx.strokeRect(patient.x + 4, patient.y + 14, 24, 24);
+
+      ctx.fillStyle = '#5f86a1';
+      ctx.fillRect(patient.x + 6, patient.y + 38, 8, 16);
+      ctx.fillRect(patient.x + 18, patient.y + 38, 8, 16);
+      ctx.strokeRect(patient.x + 6, patient.y + 38, 8, 16);
+      ctx.strokeRect(patient.x + 18, patient.y + 38, 8, 16);
+      ctx.restore();
+    }
+
+    function spawnCelebrationEffects() {
+      celebrationEffects = [];
+      for (let i = 0; i < 10; i += 1) {
+        celebrationEffects.push({
+          type: i % 2 === 0 ? 'heart' : 'flower',
+          x: 200 + Math.random() * 120,
+          y: 120 + Math.random() * 40,
+          vx: -1.1 + Math.random() * 2.2,
+          vy: -2.2 - Math.random() * 1.4,
+          size: 10 + Math.random() * 6,
+          life: 44 + Math.random() * 12,
+          maxLife: 56
+        });
+      }
+    }
+
+    function updateCelebrationEffects() {
+      for (const effect of celebrationEffects) {
+        effect.x += effect.vx;
+        effect.y += effect.vy;
+        effect.vy += 0.04;
+        effect.life -= 1;
+      }
+      celebrationEffects = celebrationEffects.filter((effect) => effect.life > 0);
+      if (celebrationEffects.length < 4 && celebrationTimer > 12 && celebrationTimer % 10 === 0) {
+        spawnCelebrationEffects();
+      }
+    }
+
+    function drawHeart(effect) {
+      const s = effect.size;
+      const alpha = Math.max(0, effect.life / effect.maxLife);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#ff6b9a';
+      ctx.beginPath();
+      ctx.arc(effect.x - s * 0.18, effect.y - s * 0.08, s * 0.22, 0, Math.PI * 2);
+      ctx.arc(effect.x + s * 0.18, effect.y - s * 0.08, s * 0.22, 0, Math.PI * 2);
+      ctx.lineTo(effect.x, effect.y + s * 0.45);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawFlower(effect) {
+      const s = effect.size;
+      const alpha = Math.max(0, effect.life / effect.maxLife);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#ffca3a';
+      for (let i = 0; i < 4; i += 1) {
+        const ang = (Math.PI * 2 / 4) * i;
+        ctx.beginPath();
+        ctx.arc(effect.x + Math.cos(ang) * s * 0.32, effect.y + Math.sin(ang) * s * 0.32, s * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ff7b7b';
+      ctx.beginPath();
+      ctx.arc(effect.x, effect.y, s * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawCelebrationEffects() {
+      celebrationEffects.forEach((effect) => {
+        if (effect.type === 'heart') {
+          drawHeart(effect);
+        } else {
+          drawFlower(effect);
+        }
+      });
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawHospitalBackground();
+      drawPlayer();
+
+      for (const obstacle of obstacles) {
+        if (obstacle.type === 'syringe') {
+          drawSyringe(obstacle);
+        } else {
+          drawGerm(obstacle);
+        }
+      }
+
+      for (const capsule of capsules) {
+        drawCapsule(capsule);
+      }
+
+      drawPatient();
+      drawCelebrationEffects();
+
+      if (patient) {
+        ctx.fillStyle = '#24485f';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillText('患者さんに薬を届けよう', 250, 28);
+      }
+
+      if (isHappyEnding) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.fillRect(86, 26, 308, 46);
+        ctx.strokeStyle = '#ff8fb1';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(86, 26, 308, 46);
+        ctx.fillStyle = '#d9487d';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText('HAPPY ENDING!', 140, 56);
+        ctx.restore();
+      }
+    }
+
+    function finishClearSequence() {
+      gameRunning = false;
+      cancelAnimationFrame(animationId);
+      if (score > bestScore) bestScore = score;
+      updateHud();
+      finalScoreEl.textContent = String(score);
+      endingMessageEl.innerHTML = `回収した薬は <b>${items}</b> 個です。<br><b>患者さんに薬を届けてクリア！</b>`;
+      isHappyEnding = false;
+      celebrationTimer = 0;
+      showScreen('ending');
+    }
+
+    function endGame(clear) {
+      if (!gameRunning) return;
+
+      if (clear) {
+        isHappyEnding = true;
+        celebrationTimer = 0;
+        spawnCelebrationEffects();
+        playHappyEndingMusic();
+        return;
+      }
+
+      gameRunning = false;
+      cancelAnimationFrame(animationId);
+      if (score > bestScore) bestScore = score;
+      updateHud();
+      finalScoreEl.textContent = String(score);
+      endingMessageEl.innerHTML = `回収した薬は <b>${items}</b> 個です。<br>次は患者さんのところまで届けましょう。`;
+      showScreen('ending');
+    }
+
+    function loop() {
+      if (!gameRunning) return;
+      update();
+      if (isHappyEnding) {
+        celebrationTimer += 1;
+        updateCelebrationEffects();
+        if (celebrationTimer > 48) {
+          finishClearSequence();
+          return;
+        }
+      }
+      draw();
+      animationId = requestAnimationFrame(loop);
+    }
+
+    function runSelfTests() {
+      console.assert(typeof drawPatient === 'function', 'drawPatient should be defined');
+      console.assert(typeof drawCelebrationEffects === 'function', 'drawCelebrationEffects should be defined');
+      console.assert(typeof finishClearSequence === 'function', 'finishClearSequence should be defined');
+
+      console.assert(
+        isColliding({ x: 0, y: 0, w: 10, h: 10 }, { x: 5, y: 5, w: 10, h: 10 }) === true,
+        'Collision test should be true'
+      );
+      console.assert(
+        isColliding({ x: 0, y: 0, w: 10, h: 10 }, { x: 30, y: 30, w: 10, h: 10 }) === false,
+        'Collision test should be false'
+      );
+
+      const initialObstacleCount = obstacles.length;
+      spawnObstacle();
+      console.assert(obstacles.length === initialObstacleCount + 1, 'spawnObstacle should add one obstacle');
+      obstacles.pop();
+
+      const initialCapsuleCount = capsules.length;
+      spawnCapsule(100);
+      console.assert(capsules.length === initialCapsuleCount + 1, 'spawnCapsule should add one capsule');
+      capsules.pop();
+
+      const previousPatient = patient;
+      const previousObstacles = obstacles.slice();
+      obstacles = [{ type: 'germ', x: 10, y: 10, w: 20, h: 20, speed: 1, passed: false }];
+      spawnPatient();
+      console.assert(patient !== null, 'spawnPatient should create a patient');
+      console.assert(obstacles.length === 0, 'spawnPatient should clear obstacles');
+      patient = previousPatient;
+      obstacles = previousObstacles;
+
+      patient = { x: 100, y: groundY - 54, w: 34, h: 54, speed: 3.8 };
+      const patientReachBox = { x: patient.x - 10, y: patient.y, w: patient.w + 20, h: patient.h };
+      console.assert(
+        isColliding({ x: 110, y: groundY - 42, w: 34, h: 42 }, patientReachBox) === true,
+        'Patient reach box should be easier to collide with'
+      );
+      patient = null;
+
+      celebrationEffects = [];
+      spawnCelebrationEffects();
+      console.assert(celebrationEffects.length === 10, 'spawnCelebrationEffects should add 10 effects');
+    }
+
+    jumpBtn.addEventListener('click', jump);
+    jumpBtn.addEventListener('touchstart', (event) => {
+      event.preventDefault();
+      jump();
+    }, { passive: false });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code !== 'Space' && event.code !== 'ArrowUp') return;
+      event.preventDefault();
+      if (document.getElementById('opening').classList.contains('active')) {
+        startGame();
+      } else {
+        jump();
+      }
+    });
+
+    window.startGame = startGame;
+    window.restartGame = restartGame;
+
+    runSelfTests();
+    updateHud();
+    draw();
+  </script>
+</body>
+</html>
